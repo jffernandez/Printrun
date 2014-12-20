@@ -15,6 +15,7 @@
 
 from Queue import Queue
 from collections import deque
+import numpy
 import wx
 import time
 from . import gcoder
@@ -223,7 +224,6 @@ class Gviz(wx.Panel):
         self.gcode = None
         self.lastpos = [0, 0, 0, 0, 0, 0, 0]
         self.hilightpos = self.lastpos[:]
-        self.gcoder = gcoder.GCode([], get_home_pos(self.build_dimensions))
         self.lines = {}
         self.pens = {}
         self.arcs = {}
@@ -507,6 +507,11 @@ class Gviz(wx.Panel):
                     self.arcpens[viz_layer].append(self.arcpen)
 
                 self.lastpos = target
+            # Transform into a numpy array for memory efficiency
+            self.lines[viz_layer] = numpy.asarray(self.lines[viz_layer], dtype = numpy.float32)
+            self.pens[viz_layer] = numpy.asarray(self.pens[viz_layer])
+            self.arcs[viz_layer] = numpy.asarray(self.arcs[viz_layer], dtype = numpy.float32)
+            self.arcpens[viz_layer] = numpy.asarray(self.arcpens[viz_layer])
             # Only add layer to self.layers now to prevent the display of an
             # unfinished layer
             self.layers[layer_idx] = viz_layer
@@ -525,14 +530,7 @@ class Gviz(wx.Panel):
         wx.CallAfter(self.Refresh)
         yield None
 
-    def addgcodehighlight(self, gcode = "M105"):
-        gcode = gcode.split("*")[0]
-        gcode = gcode.split(";")[0]
-        gcode = gcode.lower().strip()
-        if not gcode:
-            return
-        gline = self.gcoder.append(gcode, store = False)
-
+    def addgcodehighlight(self, gline):
         if gline.command not in ["G0", "G1", "G2", "G3"]:
             return
 

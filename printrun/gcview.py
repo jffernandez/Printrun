@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with Printrun.  If not, see <http://www.gnu.org/licenses/>.
 
+import logging
 import wx
 
 from . import gcoder
@@ -94,7 +95,7 @@ class GcodeViewPanel(wxGLPanel):
         if filtered:
             injector(self.parent.model.gcode, l, filtered[0])
         else:
-            print _("Invalid layer for injection")
+            logging.error(_("Invalid layer for injection"))
 
     def editlayer(self):
         l = self.parent.model.num_layers_to_draw
@@ -102,7 +103,7 @@ class GcodeViewPanel(wxGLPanel):
         if filtered:
             injector_edit(self.parent.model.gcode, l, filtered[0])
         else:
-            print _("Invalid layer for edition")
+            logging.error(_("Invalid layer for edition"))
 
     def setlayercb(self, layer):
         pass
@@ -202,7 +203,7 @@ class GcodeViewPanel(wxGLPanel):
         wx.CallAfter(self.Refresh)
 
     def layerup(self):
-        if not self.parent.model:
+        if not hasattr(self.parent, "model") or not self.parent.model:
             return
         max_layers = self.parent.model.max_layers
         current_layer = self.parent.model.num_layers_to_draw
@@ -215,7 +216,7 @@ class GcodeViewPanel(wxGLPanel):
         wx.CallAfter(self.Refresh)
 
     def layerdown(self):
-        if not self.parent.model:
+        if not hasattr(self.parent, "model") or not self.parent.model:
             return
         current_layer = self.parent.model.num_layers_to_draw
         new_layer = max(1, current_layer - 1)
@@ -226,6 +227,8 @@ class GcodeViewPanel(wxGLPanel):
     def handle_wheel(self, event):
         delta = event.GetWheelRotation()
         factor = 1.05
+        if event.ControlDown():
+            factor = 1.02
         if hasattr(self.parent, "model") and event.ShiftDown():
             if not self.parent.model:
                 return

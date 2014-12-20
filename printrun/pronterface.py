@@ -17,7 +17,6 @@
 
 import os
 import Queue
-import re
 import sys
 import time
 import threading
@@ -58,35 +57,48 @@ class PronterfaceQuitException(Exception):
     pass
 
 from .gui import MainWindow
-from .excluder import Excluder
 from .settings import wxSetting, HiddenSetting, StringSetting, SpinSetting, \
     FloatSpinSetting, BooleanSetting, StaticTextSetting
 from printrun import gcoder
-from .pronsole import REPORT_NONE, REPORT_POS, REPORT_TEMP
+from .pronsole import REPORT_NONE, REPORT_POS, REPORT_TEMP, REPORT_MANUAL
 
-class Tee(object):
-    def __init__(self, target):
+class ConsoleOutputHandler(object):
+    """Handle console output. All messages go through the logging submodule. We setup a logging handler to get logged messages and write them to both stdout (unless a log file path is specified, in which case we add another logging handler to write to this file) and the log panel.
+    We also redirect stdout and stderr to ourself to catch print messages and al."""
+
+    def __init__(self, target, log_path):
         self.stdout = sys.stdout
+        self.stderr = sys.stderr
         sys.stdout = self
-        setup_logging(sys.stdout)
-        self.target = target
+        sys.stderr = self
+        if log_path:
+            self.print_on_stdout = False
+            setup_logging(self, log_path, reset_handlers = True)
+            self.target = target
+        else:
+            self.print_on_stdout = True
+            setup_logging(sys.stdout)
+            self.target = target
 
     def __del__(self):
         sys.stdout = self.stdout
+        sys.stderr = self.stderr
 
     def write(self, data):
         try:
             self.target(data)
         except:
             pass
-        try:
-            data = data.encode("utf-8")
-        except:
-            pass
-        self.stdout.write(data)
+        if self.print_on_stdout:
+            try:
+                data = data.encode("utf-8")
+            except:
+                pass
+            self.stdout.write(data)
 
     def flush(self):
-        self.stdout.flush()
+        if self.stdout:
+            self.stdout.flush()
 
 class ComboSetting(wxSetting):
 
@@ -148,7 +160,7 @@ class PronterWindow(MainWindow, pronsole.pronsole):
         self.current_pos = [0, 0, 0]
         self.paused = False
         self.uploading = False
-        self.sentlines = Queue.Queue(0)
+        self.sentglines = Queue.Queue(0)
         self.cpbuttons = {
             "motorsoff": SpecialButton(_("Motors off"), ("M84"), (250, 250, 250), _("Switch all motors off")),
             "extrude": SpecialButton(_("Extrude"), ("pront_extrude"), (225, 200, 200), _("Advance extruder by set length")),
@@ -209,7 +221,7 @@ class PronterWindow(MainWindow, pronsole.pronsole):
         self.statusbar = self.CreateStatusBar()
         self.statusbar.SetStatusText(_("Not connected to printer."))
 
-        self.t = Tee(self.catchprint)
+        self.t = ConsoleOutputHandler(self.catchprint, self.settings.log_path)
         self.stdout = sys.stdout
         self.slicing = False
         self.loading_gcode = False
@@ -261,10 +273,10 @@ class PronterWindow(MainWindow, pronsole.pronsole):
             self.reset_ui()
 
         # Create UI
-        if self.settings.uimode == "Tabbed":
+        if self.settings.uimode in (_("Tabbed"), _("Tabbed with platers")):
             self.createTabbedGui()
         else:
-            self.createGui(self.settings.uimode == "Compact",
+            self.createGui(self.settings.uimode == _("Compact"),
                            self.settings.controlsmode == "Mini")
 
         if hasattr(self, "splitterwindow"):
@@ -514,6 +526,9 @@ class PronterWindow(MainWindow, pronsole.pronsole):
     def platecb(self, name):
         self.log(_("Plated %s") % name)
         self.loadfile(None, name)
+        if self.settings.uimode in (_("Tabbed"), _("Tabbed with platers")):
+            # Switch to page 1 (Status tab)
+            self.notebook.SetSelection(1)
 
     def do_editgcode(self, e = None):
         if self.filename is not None:
@@ -582,10 +597,13 @@ class PronterWindow(MainWindow, pronsole.pronsole):
             self.onecmd('home Y')
         elif axis == "z":
             self.onecmd('home Z')
-        elif axis == "xy":
-            self.onecmd('home XY')
         elif axis == "all":
             self.onecmd('home')
+        elif axis == "center":
+            center_x = self.build_dimensions_list[0] / 2 + self.build_dimensions_list[3]
+            center_y = self.build_dimensions_list[1] / 2 + self.build_dimensions_list[4]
+            feed = self.settings.xy_feedrate
+            self.onecmd('G0 X%s Y%s F%s' % (center_x, center_y, feed))
         else:
             return
         self.p.send_now('M114')
@@ -655,19 +673,13 @@ class PronterWindow(MainWindow, pronsole.pronsole):
     def set_verbose_communications(self, e):
         self.p.loud = e.IsChecked()
 
-    def parseusercmd(self, line):
-        if line.upper().startswith("M114"):
-            self.userm114 += 1
-        elif line.upper().startswith("M105"):
-            self.userm105 += 1
-
     def sendline(self, e):
         command = self.commandbox.GetValue()
         if not len(command):
             return
         wx.CallAfter(self.addtexttolog, ">>> " + command + "\n")
-        self.parseusercmd(str(command))
-        self.onecmd(str(command))
+        line = self.precmd(str(command))
+        self.onecmd(line)
         self.commandbox.SetSelection(0, len(command))
         self.commandbox.history.append(command)
         self.commandbox.histindex = len(self.commandbox.history)
@@ -762,6 +774,7 @@ class PronterWindow(MainWindow, pronsole.pronsole):
             wx.CallAfter(self.statusbar.SetStatusText, _("No file loaded. Please use load first."))
             return
         if not self.excluder:
+            from .excluder import Excluder
             self.excluder = Excluder()
         self.excluder.pop_window(self.fgcode, bgcolor = self.bgcolor,
                                  build_dimensions = self.build_dimensions_list)
@@ -815,7 +828,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         self.settings._add(BooleanSetting("circular_bed", False, _("Circular build platform"), _("Draw a circular (or oval) build platform instead of a rectangular one"), "Printer"), self.update_bed_viz)
         self.settings._add(SpinSetting("extruders", 0, 1, 5, _("Extruders count"), _("Number of extruders"), "Printer"))
         self.settings._add(BooleanSetting("clamp_jogging", False, _("Clamp manual moves"), _("Prevent manual moves from leaving the specified build dimensions"), "Printer"))
-        self.settings._add(ComboSetting("uimode", "Standard", ["Standard", "Compact", "Tabbed"], _("Interface mode"), _("Standard interface is a one-page, three columns layout with controls/visualization/log\nCompact mode is a one-page, two columns layout with controls + log/visualization\nTabbed mode is a two-pages mode, where the first page shows controls and the second one shows visualization and log."), "UI"), self.reload_ui)
+        self.settings._add(ComboSetting("uimode", _("Standard"), [_("Standard"), _("Compact"), _("Tabbed"), _("Tabbed with platers")], _("Interface mode"), _("Standard interface is a one-page, three columns layout with controls/visualization/log\nCompact mode is a one-page, two columns layout with controls + log/visualization\nTabbed mode is a two-pages mode, where the first page shows controls and the second one shows visualization and log.\nTabbed with platers mode is the same as Tabbed, but with two extra pages for the STL and G-Code platers."), "UI"), self.reload_ui)
         self.settings._add(ComboSetting("controlsmode", "Standard", ["Standard", "Mini"], _("Controls mode"), _("Standard controls include all controls needed for printer setup and calibration, while Mini controls are limited to the ones needed for daily printing"), "UI"), self.reload_ui)
         self.settings._add(BooleanSetting("slic3rintegration", False, _("Enable Slic3r integration"), _("Add a menu to select Slic3r profiles directly from Pronterface"), "UI"), self.reload_ui)
         self.settings._add(BooleanSetting("slic3rupdate", False, _("Update Slic3r default presets"), _("When selecting a profile in Slic3r integration menu, also save it as the default Slic3r preset"), "UI"))
@@ -906,7 +919,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                 grid[item - 1] = value
                 value = tuple(grid)
             except:
-                traceback.print_exc()
+                self.logError(traceback.format_exc())
         if hasattr(self.gviz, trueparam):
             self.apply_gviz_params(self.gviz, trueparam, value)
         if hasattr(self.gwindow, "p") and hasattr(self.gwindow.p, trueparam):
@@ -972,7 +985,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                 status_string += _(" Line# %d of %d lines |") % (self.p.queueindex, len(self.p.mainqueue))
             if progress > 0:
                 status_string += _(" Est: %s of %s remaining | ") % (format_duration(secondsremain),
-                                                              format_duration(secondsestimate))
+                                                                     format_duration(secondsestimate))
                 status_string += _(" Z: %.3f mm") % self.curlayer
         elif self.loading_gcode:
             status_string = self.loading_gcode_message
@@ -982,10 +995,10 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         # temperature monitoring and status loop sleep
         pronsole.pronsole.statuschecker_inner(self, self.settings.monitor)
         try:
-            while not self.sentlines.empty():
-                gc = self.sentlines.get_nowait()
+            while not self.sentglines.empty():
+                gc = self.sentglines.get_nowait()
                 wx.CallAfter(self.gviz.addgcodehighlight, gc)
-                self.sentlines.task_done()
+                self.sentglines.task_done()
         except Queue.Empty:
             pass
 
@@ -1026,8 +1039,8 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         try:
             baud = int(self.baud.GetValue())
         except:
-            self.logError(_("Could not parse baud rate: "))
-            traceback.print_exc(file = sys.stdout)
+            self.logError(_("Could not parse baud rate: ")
+                          + "\n" + traceback.format_exc())
         if self.paused:
             self.p.paused = 0
             self.p.printing = 0
@@ -1037,7 +1050,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             self.paused = 0
             if self.sdprinting:
                 self.p.send_now("M26 S0")
-        if not self.connect_to_printer(port, baud):
+        if not self.connect_to_printer(port, baud, self.settings.dtr):
             return
         if port != self.settings.port:
             self.set("port", port)
@@ -1122,6 +1135,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         if not self.p.online:
             wx.CallAfter(self.statusbar.SetStatusText, _("Not connected to printer."))
             return
+        self.sdprinting = False
         self.on_startprint()
         self.p.startprint(self.fgcode)
 
@@ -1158,7 +1172,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         self.p.clear = True
         self.uploading = False
 
-    def pause(self, event):
+    def pause(self, event = None):
         if not self.paused:
             self.log(_("Print paused at: %s") % format_time(time.time()))
             if self.sdprinting:
@@ -1207,7 +1221,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                 self.recvlisteners.append(self.waitforsdresponse)
                 self.p.send_now("M23 " + target.lower())
         dlg.Destroy()
-        # print self.sdfiles
 
     def getfiles(self):
         if not self.p.online:
@@ -1245,9 +1258,9 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             self.slicep.wait()
             self.stopsf = 1
         except:
-            logging.error(_("Failed to execute slicing software: "))
+            self.logError(_("Failed to execute slicing software: ")
+                          + "\n" + traceback.format_exc())
             self.stopsf = 1
-            traceback.print_exc(file = sys.stdout)
 
     def slice_monitor(self):
         while not self.stopsf:
@@ -1345,6 +1358,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
     def load_gcode_async(self, filename):
         self.filename = filename
         gcode = self.pre_gcode_load()
+        self.log(_("Loading file: %s") % filename)
         threading.Thread(target = self.load_gcode_async_thread, args = (gcode,)).start()
 
     def load_gcode_async_thread(self, gcode):
@@ -1374,8 +1388,11 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
 
     def pre_gcode_load(self):
         self.loading_gcode = True
-        self.loading_gcode_message = _("Loading %s") % self.filename
-        gcode = gcoder.GCode(deferred = True)
+        self.loading_gcode_message = _("Loading %s...") % self.filename
+        if self.settings.mainviz == "None":
+            gcode = gcoder.LightGCode(deferred = True)
+        else:
+            gcode = gcoder.GCode(deferred = True)
         self.viz_last_yield = 0
         self.viz_last_layer = -1
         self.start_viz_thread(gcode)
@@ -1384,6 +1401,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
     def post_gcode_load(self, print_stats = True):
         # Must be called in wx.CallAfter for safety
         self.loading_gcode = False
+        self.SetTitle(_(u"Pronterface - %s") % self.filename)
         message = _("Loaded %s, %d lines") % (self.filename, len(self.fgcode),)
         self.log(message)
         self.statusbar.SetStatusText(message)
@@ -1537,7 +1555,8 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         elif gline.command.startswith("T"):
             tool = gline.command[1:]
             if hasattr(self, "extrudersel"): wx.CallAfter(self.extrudersel.SetValue, tool)
-        self.sentlines.put_nowait(line)
+        if gline.is_move:
+            self.sentglines.put_nowait(gline)
 
     def is_excluded_move(self, gline):
         """Check whether the given moves ends at a position specified as
@@ -1637,7 +1656,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                     if self.display_graph: wx.CallAfter(self.graph.SetBedTargetTemperature, setpoint)
                     if self.display_gauges: wx.CallAfter(self.bedtgauge.SetTarget, setpoint)
         except:
-            traceback.print_exc()
+            self.logError(traceback.format_exc())
 
     def update_pos(self):
         bits = gcoder.m114_exp.findall(self.posreport)
@@ -1656,25 +1675,55 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         if y is not None: self.current_pos[1] = y
         if z is not None: self.current_pos[2] = z
 
+    def recvcb_actions(self, l):
+        if l.startswith("!!"):
+            if not self.paused:
+                wx.CallAfter(self.pause)
+            msg = l.split(" ", 1)
+            if len(msg) > 1 and not self.p.loud:
+                wx.CallAfter(self.addtexttolog, msg[1] + "\n")
+            return True
+        elif l.startswith("//"):
+            command = l.split(" ", 1)
+            if len(command) > 1:
+                command = command[1]
+                self.log(_("Received command %s") % command)
+                command = command.split(":")
+                if len(command) == 2 and command[0] == "action":
+                    command = command[1]
+                    if command == "pause":
+                        if not self.paused:
+                            wx.CallAfter(self.pause)
+                        return True
+                    elif command == "resume":
+                        if self.paused:
+                            wx.CallAfter(self.pause)
+                        return True
+                    elif command == "disconnect":
+                        wx.CallAfter(self.disconnect)
+                        return True
+        return False
+
     def recvcb(self, l):
-        report_type = self.recvcb_report(l)
-        isreport = report_type != REPORT_NONE
-        if report_type == REPORT_POS:
-            self.update_pos()
-        elif report_type == REPORT_TEMP:
-            wx.CallAfter(self.tempdisp.SetLabel, self.tempreadings.strip().replace("ok ", ""))
-            self.update_tempdisplay()
-        tstring = l.rstrip()
-        if not self.p.loud and (tstring not in ["ok", "wait"] and not isreport):
-            wx.CallAfter(self.addtexttolog, tstring + "\n")
+        l = l.rstrip()
+        if not self.recvcb_actions(l):
+            report_type = self.recvcb_report(l)
+            isreport = report_type != REPORT_NONE
+            if report_type & REPORT_POS:
+                self.update_pos()
+            elif report_type & REPORT_TEMP:
+                wx.CallAfter(self.tempdisp.SetLabel, self.tempreadings.strip().replace("ok ", ""))
+                self.update_tempdisplay()
+            if not self.p.loud and (l not in ["ok", "wait"] and (not isreport or report_type & REPORT_MANUAL)):
+                wx.CallAfter(self.addtexttolog, l + "\n")
         for listener in self.recvlisteners:
             listener(l)
 
     def listfiles(self, line, ignored = False):
         if "Begin file list" in line:
-            self.sdlisting = 1
+            self.sdlisting = True
         elif "End file list" in line:
-            self.sdlisting = 0
+            self.sdlisting = False
             self.recvlisteners.remove(self.listfiles)
             wx.CallAfter(self.filesloaded)
         elif self.sdlisting:
@@ -1689,13 +1738,13 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             wx.CallAfter(self.statusbar.SetStatusText, l)
         if "File selected" in l:
             wx.CallAfter(self.statusbar.SetStatusText, _("Starting print"))
-            self.sdprinting = 1
+            self.sdprinting = True
             self.p.send_now("M24")
             self.startcb()
             return
         if "Done printing file" in l:
             wx.CallAfter(self.statusbar.SetStatusText, l)
-            self.sdprinting = 0
+            self.sdprinting = False
             self.recvlisteners.remove(self.waitforsdresponse)
             self.endcb()
             return
@@ -1723,7 +1772,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             if btndef is None:
                 if i == len(custombuttons) - 1:
                     self.newbuttonbutton = b = wx.Button(self.centerpanel, -1, "+", size = (19, 18), style = wx.BU_EXACTFIT)
-                    # b.SetFont(wx.Font(12, wx.FONTFAMILY_SWISS, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
                     b.SetForegroundColour("#4444ff")
                     b.SetToolTip(wx.ToolTip(_("click to add new custom button")))
                     b.Bind(wx.EVT_BUTTON, self.cbutton_edit)
@@ -1782,9 +1830,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             self.custombuttons[num].background = colour
         if not self.processing_rc:
             self.cbuttons_reload()
-        # except Exception, x:
-        #    print "Bad syntax for button definition, see 'help button'"
-        #    print x
 
     def cbutton_save(self, n, bdef, new_n = None):
         if new_n is None: new_n = n
@@ -1793,7 +1838,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         elif bdef.background:
             colour = bdef.background
             if type(colour) not in (str, unicode):
-                # print type(colour), map(type, colour)
                 if type(colour) == tuple and tuple(map(type, colour)) == (int, int, int):
                     colour = map(lambda x: x % 256, colour)
                     colour = wx.Colour(*colour).GetAsString(wx.C2S_NAME | wx.C2S_HTML_SYNTAX)
@@ -1812,7 +1856,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             if button.properties.background:
                 colour = button.properties.background
                 if type(colour) not in (str, unicode):
-                    # print type(colour)
                     if type(colour) == tuple and tuple(map(type, colour)) == (int, int, int):
                         colour = map(lambda x: x % 256, colour)
                         colour = wx.Colour(*colour).GetAsString(wx.C2S_NAME | wx.C2S_HTML_SYNTAX)
@@ -1851,8 +1894,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         self.custombuttons[n], self.custombuttons[n + 1] = self.custombuttons[n + 1], self.custombuttons[n]
         self.cbutton_save(n, self.custombuttons[n])
         self.cbutton_save(n + 1, self.custombuttons[n + 1])
-        # if self.custombuttons[-1] is None:
-        #    del self.custombuttons[-1]
         wx.CallAfter(self.cbuttons_reload)
 
     def editbutton(self, e):
@@ -1894,15 +1935,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
             if not hasattr(self, "dragging"):
                 # init dragging of the custom button
                 if hasattr(obj, "custombutton") and obj.properties is not None:
-                    # self.newbuttonbutton.SetLabel("")
-                    # self.newbuttonbutton.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-                    # self.newbuttonbutton.SetForegroundColour("black")
-                    # self.newbuttonbutton.SetSize(obj.GetSize())
-                    # if self.toolbarsizer.GetItem(self.newbuttonbutton) is not None:
-                    #    self.toolbarsizer.SetItemMinSize(self.newbuttonbutton, obj.GetSize())
-                    #    self.mainsizer.Layout()
                     for b in self.custombuttons_widgets:
-                        # if b.IsFrozen(): b.Thaw()
                         if b.properties is None:
                             b.Enable()
                             b.SetLabel("")
@@ -1912,7 +1945,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                             if self.toolbarsizer.GetItem(b) is not None:
                                 self.toolbarsizer.SetItemMinSize(b, obj.GetSize())
                                 self.mainsizer.Layout()
-                        #    b.SetStyle(wx.ALIGN_CENTRE+wx.ST_NO_AUTORESIZE+wx.SIMPLE_BORDER)
                     self.dragging = wx.Button(self.panel, -1, obj.GetLabel(), style = wx.BU_EXACTFIT)
                     self.dragging.SetBackgroundColour(obj.GetBackgroundColour())
                     self.dragging.SetForegroundColour(obj.GetForegroundColour())
@@ -1935,22 +1967,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                     if b.GetScreenRect().Contains(scrpos):
                         dst = b
                         break
-                # if dst is None and self.panel.GetScreenRect().Contains(scrpos):
-                #    # try to check if it is after buttons at the end
-                #    tspos = self.panel.ClientToScreen(self.toolbarsizer.GetPosition())
-                #    bspos = self.panel.ClientToScreen(self.cbuttonssizer.GetPosition())
-                #    tsrect = wx.Rect(*(tspos.Get()+self.toolbarsizer.GetSize().Get()))
-                #    bsrect = wx.Rect(*(bspos.Get()+self.cbuttonssizer.GetSize().Get()))
-                #    lbrect = btns[-1].GetScreenRect()
-                #    p = scrpos.Get()
-                #    if len(btns)<4 and tsrect.Contains(scrpos):
-                #        if lbrect.GetRight() < p[0]:
-                #            print "Right of last button on upper cb sizer"
-                #    if bsrect.Contains(scrpos):
-                #        if lbrect.GetBottom() < p[1]:
-                #            print "Below last button on lower cb sizer"
-                #        if lbrect.GetRight() < p[0] and lbrect.GetTop() <= p[1] and lbrect.GetBottom() >= p[1]:
-                #            print "Right to last button on lower cb sizer"
                 if dst is not self.last_drag_dest:
                     if self.last_drag_dest is not None:
                         self.last_drag_dest.SetBackgroundColour(self.last_drag_dest.s_bgc)
@@ -2005,7 +2021,7 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
                     return self.editbutton(e)
                 self.cur_button = e.GetEventObject().custombutton
             command = e.GetEventObject().properties.command
-            self.parseusercmd(command)
+            command = self.precmd(command)
             self.onecmd(command)
             self.cur_button = None
         except:
@@ -2052,7 +2068,6 @@ Printrun. If not, see <http://www.gnu.org/licenses/>."""
         hbox = wx.BoxSizer(wx.HORIZONTAL)
         okb = wx.Button(dialog, wx.ID_OK, _("Ok"), size = (60, 24))
         dialog.Bind(wx.EVT_TEXT_ENTER, lambda e: dialog.EndModal(wx.ID_OK), dialog.namectrl)
-        # dialog.Bind(wx.EVT_BUTTON, lambda e:self.new_macro_named(dialog, e), okb)
         hbox.Add(okb)
         hbox.Add(wx.Button(dialog, wx.ID_CANCEL, _("Cancel"), size = (60, 24)))
         vbox.Add(panel)

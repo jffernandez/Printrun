@@ -16,19 +16,12 @@
 # along with Printrun.  If not, see <http://www.gnu.org/licenses/>.
 
 import sys
-import traceback
-import logging
-from printrun.pronsole import pronsole
+import wx
 
-if __name__ == "__main__":
+from printrun.gcodeplater import GcodePlater
 
-    interp = pronsole()
-    interp.parse_cmdline(sys.argv[1:])
-    try:
-        interp.cmdloop()
-    except SystemExit:
-        interp.p.disconnect()
-    except:
-        logging.error(_("Caught an exception, exiting:")
-                      + "\n" + traceback.format_exc())
-        interp.p.disconnect()
+if __name__ == '__main__':
+    app = wx.App(False)
+    main = GcodePlater(filenames = sys.argv[1:])
+    main.Show()
+    app.MainLoop()

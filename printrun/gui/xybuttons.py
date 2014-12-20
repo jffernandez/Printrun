@@ -44,7 +44,7 @@ class XYButtons(BufferedCanvas):
     spacer = 7
     imagename = "control_xy.png"
     corner_to_axis = {
-        -1: "xy",
+        -1: "center",
         0: "x",
         1: "z",
         2: "y",
@@ -407,7 +407,7 @@ class XYButtonsMini(XYButtons):
         0: "x",
         1: "z",
         2: "y",
-        3: "xy",
+        3: "center",
     }
 
     def bind_events(self):

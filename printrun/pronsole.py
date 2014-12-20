@@ -35,7 +35,8 @@ from serial import SerialException
 from . import printcore
 from .utils import install_locale, run_command, get_command_output, \
     format_time, format_duration, RemainingTimeEstimator, \
-    get_home_pos, parse_build_dimensions, parse_temperature_report
+    get_home_pos, parse_build_dimensions, parse_temperature_report, \
+    setup_logging
 install_locale('pronterface')
 from .settings import Settings, BuildDimensionsSetting
 from .power import powerset_print_start, powerset_print_stop
@@ -62,6 +63,7 @@ tempreading_exp = re.compile("(^T:| T:)")
 REPORT_NONE = 0
 REPORT_POS = 1
 REPORT_TEMP = 2
+REPORT_MANUAL = 4
 
 class Status(object):
 
@@ -154,7 +156,6 @@ class pronsole(cmd.Cmd):
         self.settings._bedtemp_pla_cb = self.set_temp_preset
         self.update_build_dimensions(None, self.settings.build_dimensions)
         self.update_tcp_streaming_mode(None, self.settings.tcp_streaming_mode)
-        self.update_rpc_server(None, self.settings.rpc_server)
         self.monitoring = 0
         self.starttime = 0
         self.extra_print_time = 0
@@ -214,10 +215,10 @@ class pronsole(cmd.Cmd):
                         try:
                             line = raw_input(self.prompt)
                         except EOFError:
-                            print ""
+                            self.log("")
                             self.do_exit("")
                         except KeyboardInterrupt:
-                            print ""
+                            self.log("")
                             line = ""
                     else:
                         self.stdout.write(self.prompt)
@@ -249,7 +250,8 @@ class pronsole(cmd.Cmd):
         return False
 
     def log(self, *msg):
-        print u"".join(unicode(i) for i in msg)
+        msg = u"".join(unicode(i) for i in msg)
+        logging.info(msg)
 
     def logError(self, *msg):
         msg = u"".join(unicode(i) for i in msg)
@@ -327,8 +329,12 @@ class pronsole(cmd.Cmd):
     def help_gcodes(self):
         self.log("Gcodes are passed through to the printer as they are")
 
-    def parseusercmd(self, line):
-        pass
+    def precmd(self, line):
+        if line.upper().startswith("M114"):
+            self.userm114 += 1
+        elif line.upper().startswith("M105"):
+            self.userm105 += 1
+        return line
 
     def help_shell(self):
         self.log("Executes a python command. Example:")
@@ -363,16 +369,16 @@ class pronsole(cmd.Cmd):
 
     def do_exit(self, l):
         if self.status.extruder_temp_target != 0:
-            print "Setting extruder temp to 0"
+            self.log("Setting extruder temp to 0")
         self.p.send_now("M104 S0.0")
         if self.status.bed_enabled:
             if self.status.bed_temp_target != 0:
-                print "Setting bed temp to 0"
+                self.log("Setting bed temp to 0")
             self.p.send_now("M140 S0.0")
         self.log("Disconnecting from printer...")
         if self.p.printing:
-            print "Are you sure you want to exit while printing?"
-            print "(this will terminate the print)."
+            self.log(_("Are you sure you want to exit while printing?\n\
+(this will terminate the print)."))
             if not self.confirm():
                 return
         self.log(_("Exiting program. Goodbye!"))
@@ -439,7 +445,7 @@ class pronsole(cmd.Cmd):
             return ws + ls[1:] + "\n"  # python mode
         else:
             ls = ls.replace('"', '\\"')  # need to escape double quotes
-            ret = ws + 'self.parseusercmd("' + ls + '".format(*arg))\n'  # parametric command mode
+            ret = ws + 'self.precmd("' + ls + '".format(*arg))\n'  # parametric command mode
             return ret + ws + 'self.onecmd("' + ls + '".format(*arg))\n'
 
     def compile_macro(self, macro_name, macro_def):
@@ -547,8 +553,10 @@ class pronsole(cmd.Cmd):
                 self.log("%s = %s" % (k, str(getattr(self.settings, k))))
             return
         if len(args) < 2:
+            # Try getting the default value of the setting to check whether it
+            # actually exists
             try:
-                self.log("%s = %s" % (args[0], getattr(self.settings, args[0])))
+                getattr(self.settings, args[0])
             except AttributeError:
                 logging.warning("Unknown variable '%s'" % args[0])
             return
@@ -687,6 +695,7 @@ class pronsole(cmd.Cmd):
         for command in args.execute:
             self.onecmd(command)
         self.processing_args = False
+        self.update_rpc_server(None, self.settings.rpc_server)
         if args.filename:
             filename = args.filename.decode(locale.getpreferredencoding())
             self.cmdline_filename_callback(filename)
@@ -700,14 +709,15 @@ class pronsole(cmd.Cmd):
         args = [arg for arg in args if not arg.startswith("-psn")]
         args = parser.parse_args(args = args)
         self.process_cmdline_arguments(args)
+        setup_logging(sys.stdout, self.settings.log_path, True)
 
     #  --------------------------------------------------------------
     #  Printer connection handling
     #  --------------------------------------------------------------
 
-    def connect_to_printer(self, port, baud):
+    def connect_to_printer(self, port, baud, dtr):
         try:
-            self.p.connect(port, baud)
+            self.p.connect(port, baud, dtr)
         except SerialException as e:
             # Currently, there is no errno, but it should be there in the future
             if e.errno == 2:
@@ -755,7 +765,7 @@ class pronsole(cmd.Cmd):
         if baud != self.settings.baudrate:
             self.settings.baudrate = baud
             self.save_in_rc("set baudrate", "set baudrate %d" % baud)
-        self.connect_to_printer(port, baud)
+        self.connect_to_printer(port, baud,dtr)
 
     def help_connect(self):
         self.log("Connect to printer")
@@ -825,7 +835,7 @@ class pronsole(cmd.Cmd):
                 self.disconnect()
                 return
             if do_monitoring:
-                if self.sdprinting:
+                if self.sdprinting and not self.paused:
                     self.p.send_now("M27")
                 if self.m105_waitcycles % 10 == 0:
                     self.p.send_now("M105")
@@ -860,7 +870,7 @@ class pronsole(cmd.Cmd):
         if not filename:
             self.logError("No file name given.")
             return
-        self.log("Loading file: " + filename)
+        self.log(_("Loading file: %s") % filename)
         if not os.path.exists(filename):
             self.logError("File not found!")
             return
@@ -978,8 +988,8 @@ class pronsole(cmd.Cmd):
             if isinstance(e, KeyboardInterrupt):
                 self.logError(_("...interrupted!"))
             else:
-                self.logError(_("Something wrong happened while uploading:"))
-                traceback.print_exc(file = sys.stdout)
+                self.logError(_("Something wrong happened while uploading:")
+                              + "\n" + traceback.format_exc())
             self.p.pause()
             self.p.send_now("M29 " + targetname)
             time.sleep(0.2)
@@ -1014,6 +1024,7 @@ class pronsole(cmd.Cmd):
             return
         self.log(_("Printing %s") % self.filename)
         self.log(_("You can monitor the print with the monitor command."))
+        self.sdprinting = False
         self.p.startprint(self.fgcode)
 
     def do_pause(self, l):
@@ -1029,7 +1040,7 @@ class pronsole(cmd.Cmd):
     def help_pause(self):
         self.log(_("Pauses a running print"))
 
-    def pause(self, event):
+    def pause(self, event = None):
         return self.do_pause(None)
 
     def do_resume(self, l):
@@ -1085,12 +1096,12 @@ class pronsole(cmd.Cmd):
         if "File selected" in l:
             self.log(_("Starting print"))
             self.p.send_now("M24")
-            self.sdprinting = 1
+            self.sdprinting = True
             # self.recvlisteners.remove(self.waitforsdresponse)
             return
         if "Done printing file" in l:
             self.log(l)
-            self.sdprinting = 0
+            self.sdprinting = False
             self.recvlisteners.remove(self.waitforsdresponse)
             return
         if "SD printing byte" in l:
@@ -1143,25 +1154,33 @@ class pronsole(cmd.Cmd):
     def startcb(self, resuming = False):
         self.starttime = time.time()
         if resuming:
-            print _("Print resumed at: %s") % format_time(self.starttime)
+            self.log(_("Print resumed at: %s") % format_time(self.starttime))
         else:
-            print _("Print started at: %s") % format_time(self.starttime)
+            self.log(_("Print started at: %s") % format_time(self.starttime))
             if not self.sdprinting:
                 self.compute_eta = RemainingTimeEstimator(self.fgcode)
             else:
                 self.compute_eta = None
+
+            if self.settings.start_command:
+                output = get_command_output(self.settings.start_command,
+                                            {"$s": str(self.filename),
+                                             "$t": format_time(time.time())})
+                if output:
+                    self.log("Start command output:")
+                    self.log(output.rstrip())
         try:
             powerset_print_start(reason = "Preventing sleep during print")
         except:
-            logging.error(_("Failed to set power settings:"))
-            traceback.print_exc(file = sys.stdout)
+            self.logError(_("Failed to set power settings:")
+                          + "\n" + traceback.format_exc())
 
     def endcb(self):
         try:
             powerset_print_stop()
         except:
-            logging.error(_("Failed to set power settings:"))
-            traceback.print_exc(file = sys.stdout)
+            self.logError(_("Failed to set power settings:")
+                          + "\n" + traceback.format_exc())
         if self.p.queueindex == 0:
             print_duration = int(time.time() - self.starttime + self.extra_print_time)
             self.log(_("Print ended at: %(end_time)s and took %(duration)s") % {"end_time": format_time(time.time()),
@@ -1185,33 +1204,68 @@ class pronsole(cmd.Cmd):
         if "ok C:" in l or "Count" in l \
            or ("X:" in l and len(gcoder.m114_exp.findall(l)) == 6):
             self.posreport = l
+            isreport = REPORT_POS
             if self.userm114 > 0:
                 self.userm114 -= 1
-            else:
-                isreport = REPORT_POS
+                isreport |= REPORT_MANUAL
         if "ok T:" in l or tempreading_exp.findall(l):
             self.tempreadings = l
+            isreport = REPORT_TEMP
             if self.userm105 > 0:
                 self.userm105 -= 1
+                isreport |= REPORT_MANUAL
             else:
                 self.m105_waitcycles = 0
-                isreport = REPORT_TEMP
         return isreport
 
-    def recvcb(self, l):
-        report_type = self.recvcb_report(l)
-        if report_type == REPORT_TEMP:
-            self.status.update_tempreading(l)
-        tstring = l.rstrip()
-        for listener in self.recvlisteners:
-            listener(l)
-        if tstring != "ok" and not self.sdlisting \
-          and not self.monitoring and report_type == REPORT_NONE:
-            if tstring[:5] == "echo:":
-                tstring = tstring[5:].lstrip()
-            if self.silent is False: print "\r" + tstring.ljust(15)
+    def recvcb_actions(self, l):
+        if l.startswith("!!"):
+            self.do_pause(None)
+            msg = l.split(" ", 1)
+            if len(msg) > 1 and self.silent is False: self.logError(msg[1].ljust(15))
             sys.stdout.write(self.promptf())
             sys.stdout.flush()
+            return True
+        elif l.startswith("//"):
+            command = l.split(" ", 1)
+            if len(command) > 1:
+                command = command[1]
+                self.log(_("Received command %s") % command)
+                command = command.split(":")
+                if len(command) == 2 and command[0] == "action":
+                    command = command[1]
+                    if command == "pause":
+                        self.do_pause(None)
+                        sys.stdout.write(self.promptf())
+                        sys.stdout.flush()
+                        return True
+                    elif command == "resume":
+                        self.do_resume(None)
+                        sys.stdout.write(self.promptf())
+                        sys.stdout.flush()
+                        return True
+                    elif command == "disconnect":
+                        self.do_disconnect(None)
+                        sys.stdout.write(self.promptf())
+                        sys.stdout.flush()
+                        return True
+        return False
+
+    def recvcb(self, l):
+        l = l.rstrip()
+        for listener in self.recvlisteners:
+            listener(l)
+        if not self.recvcb_actions(l):
+            report_type = self.recvcb_report(l)
+            if report_type & REPORT_TEMP:
+                self.status.update_tempreading(l)
+            if l != "ok" and not self.sdlisting \
+               and not self.monitoring and (report_type == REPORT_NONE or report_type & REPORT_MANUAL):
+                if l[:5] == "echo:":
+                    l = l[5:].lstrip()
+                if self.silent is False: self.log("\r" + l.ljust(15))
+                sys.stdout.write(self.promptf())
+                sys.stdout.flush()
 
     def layer_change_cb(self, newlayer):
         layerz = self.fgcode.all_layers[newlayer].z
@@ -1277,10 +1331,10 @@ class pronsole(cmd.Cmd):
             self.p.send_now("M105")
             time.sleep(0.75)
             if not self.status.bed_enabled:
-                print "Hotend: %s/%s" % (self.status.extruder_temp, self.status.extruder_temp_target)
+                self.log(_("Hotend: %s/%s") % (self.status.extruder_temp, self.status.extruder_temp_target))
             else:
-                print "Hotend: %s/%s" % (self.status.extruder_temp, self.status.extruder_temp_target)
-                print "Bed:    %s/%s" % (self.status.bed_temp, self.status.bed_temp_target)
+                self.log(_("Hotend: %s/%s") % (self.status.extruder_temp, self.status.extruder_temp_target))
+                self.log(_("Bed:    %s/%s") % (self.status.bed_temp, self.status.bed_temp_target))
 
     def help_gettemp(self):
         self.log(_("Read the extruder and bed temperature."))
@@ -1297,7 +1351,7 @@ class pronsole(cmd.Cmd):
 
         if f >= 0:
             if f > 250:
-                print _("%s is a high temperature to set your extruder to. Are you sure you want to do that?") % f
+                self.log(_("%s is a high temperature to set your extruder to. Are you sure you want to do that?") % f)
                 if not self.confirm():
                     return
             if self.p.online:
@@ -1379,7 +1433,7 @@ class pronsole(cmd.Cmd):
                     sys.stdout.flush()
                 prev_msg_len = len(prev_msg)
         except KeyboardInterrupt:
-            if self.silent is False: print _("Done monitoring.")
+            if self.silent is False: self.log(_("Done monitoring."))
         self.monitoring = 0
 
     def help_monitor(self):

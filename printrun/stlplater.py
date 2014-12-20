@@ -24,6 +24,7 @@ install_locale('pronterface')
 
 import wx
 import time
+import logging
 import threading
 import math
 import sys
@@ -33,7 +34,7 @@ import subprocess
 from copy import copy
 
 from printrun import stltool
-from printrun.objectplater import Plater
+from printrun.objectplater import make_plater, PlaterPanel
 
 glview = False
 if "-nogl" not in sys.argv:
@@ -41,8 +42,8 @@ if "-nogl" not in sys.argv:
         from printrun import stlview
         glview = True
     except:
-        print "Could not load 3D viewer for plater:"
-        traceback.print_exc()
+        logging.warning("Could not load 3D viewer for plater:"
+                        + "\n" + traceback.format_exc())
 
 
 def evalme(s):
@@ -136,7 +137,6 @@ class showstl(wx.Window):
     def keypress(self, event):
         """gets keypress events and moves/rotates acive shape"""
         keycode = event.GetKeyCode()
-        # print keycode
         step = 5
         angle = 18
         if event.ControlDown():
@@ -216,15 +216,15 @@ class showstl(wx.Window):
             dc.Blit(scale * m.offsets[0] - bsz[0] / 2, 400 - (scale * m.offsets[1] + bsz[1] / 2), bsz[0], bsz[1], dcs, 0, 0, useMask = 1)
         del dc
 
-class StlPlater(Plater):
+class StlPlaterPanel(PlaterPanel):
 
     load_wildcard = _("STL files (*.stl;*.STL)|*.stl;*.STL|OpenSCAD files (*.scad)|*.scad")
     save_wildcard = _("STL files (*.stl;*.STL)|*.stl;*.STL")
 
-    def __init__(self, filenames = [], size = (800, 580), callback = None,
-                 parent = None, build_dimensions = None, circular_platform = False,
-                 simarrange_path = None, antialias_samples = 0):
-        super(StlPlater, self).__init__(filenames, size, callback, parent, build_dimensions)
+    def prepare_ui(self, filenames = [], callback = None,
+                   parent = None, build_dimensions = None, circular_platform = False,
+                   simarrange_path = None, antialias_samples = 0):
+        super(StlPlaterPanel, self).prepare_ui(filenames, callback, parent, build_dimensions)
         self.cutting = False
         self.cutting_axis = None
         self.cutting_dist = None
@@ -266,7 +266,7 @@ class StlPlater(Plater):
             self.menusizer.Add(cutpanel, pos = (nrows + 1, 0), span = (1, 2), flag = wx.EXPAND)
         else:
             viewer = showstl(self, (580, 580), (0, 0))
-        self.simarrange_path = simarrange_path if simarrange_path else "./simarrange/sa"
+        self.simarrange_path = simarrange_path
         self.set_viewer(viewer)
 
     def start_cutting_tool(self, event, axis, direction):
@@ -293,7 +293,7 @@ class StlPlater(Plater):
         model = self.models[name]
         transformation = transformation_matrix(model)
         transformed = model.transform(transformation)
-        print _("Cutting %s alongside %s axis") % (name, self.cutting_axis)
+        logging.info(_("Cutting %s alongside %s axis") % (name, self.cutting_axis))
         axes = ["x", "y", "z"]
         cut = transformed.cut(axes.index(self.cutting_axis),
                               self.cutting_direction,
@@ -339,7 +339,7 @@ class StlPlater(Plater):
             transformation = transformation_matrix(model)
             transformed = model.transform(transformation)
             if not transformed.intersect_box(ray_near, ray_far):
-                print "Skipping %s for rebase search" % key
+                logging.debug("Skipping %s for rebase search" % key)
                 continue
             facet, facet_dist = transformed.intersect(ray_near, ray_far)
             if facet is not None and facet_dist < best_dist:
@@ -347,7 +347,7 @@ class StlPlater(Plater):
                 best_facet = facet
                 best_dist = facet_dist
         if best_match is not None:
-            print "Rebasing %s" % best_match
+            logging.info("Rebasing %s" % best_match)
             model = self.models[best_match]
             newmodel = model.rebase(best_facet)
             newmodel.offsets = list(model.offsets)
@@ -362,31 +362,36 @@ class StlPlater(Plater):
             wx.CallAfter(self.Refresh)
 
     def done(self, event, cb):
-        try:
+        if not os.path.exists("tempstl"):
             os.mkdir("tempstl")
-        except:
-            pass
         name = "tempstl/" + str(int(time.time()) % 10000) + ".stl"
         self.export_to(name)
         if cb is not None:
             cb(name)
-        self.Destroy()
+        if self.destroy_on_done:
+            self.Destroy()
 
     def load_file(self, filename):
         if filename.lower().endswith(".stl"):
             try:
                 self.load_stl(filename)
             except:
-                dlg = wx.MessageDialog(self, _("Loading STL file failed"), _("Error"), wx.OK)
+                dlg = wx.MessageDialog(self, _("Loading STL file failed"),
+                                       _("Error:") + traceback.format_exc(),
+                                       wx.OK)
                 dlg.ShowModal()
-                traceback.print_exc(file = sys.stdout)
+                logging.error(_("Loading STL file failed:")
+                              + "\n" + traceback.format_exc())
         elif filename.lower().endswith(".scad"):
             try:
                 self.load_scad(filename)
             except:
-                dlg = wx.MessageDialog(self, _("Loading OpenSCAD file failed"), _("Error"), wx.OK)
+                dlg = wx.MessageDialog(self, _("Loading OpenSCAD file failed"),
+                                       _("Error:") + traceback.format_exc(),
+                                       wx.OK)
                 dlg.ShowModal()
-                traceback.print_exc(file = sys.stdout)
+                logging.error(_("Loading OpenSCAD file failed:")
+                              + "\n" + traceback.format_exc())
 
     def load_scad(self, name):
         lf = open(name)
@@ -417,7 +422,7 @@ class StlPlater(Plater):
 
     def load_stl(self, name):
         if not os.path.exists(name):
-            print _("Couldn't load non-existing file %s") % name
+            logging.error(_("Couldn't load non-existing file %s") % name)
             return
         path = os.path.split(name)[0]
         self.basedir = path
@@ -467,19 +472,22 @@ class StlPlater(Plater):
                 model = model.transform(transformation_matrix(model))
                 facets += model.facets
             stltool.emitstl(name, facets, "plater_export")
-            print _("Wrote plate to %s") % name
+            logging.info(_("Wrote plate to %s") % name)
 
     def autoplate(self, event = None):
-        try:
-            self.autoplate_simarrange()
-        except:
-            traceback.print_exc(file = sys.stdout)
-            print _("Failed to use simarrange for plating, "
-                    "falling back to the standard method")
+        if self.simarrange_path:
+            try:
+                self.autoplate_simarrange()
+            except Exception, e:
+                logging.warning(_("Failed to use simarrange for plating, "
+                                  "falling back to the standard method. "
+                                  "The error was: ") + e)
+                super(StlPlater, self).autoplate()
+        else:
             super(StlPlater, self).autoplate()
 
     def autoplate_simarrange(self):
-        print _("Autoplating using simarrange")
+        logging.info(_("Autoplating using simarrange"))
         models = dict(self.models)
         files = [model.filename for model in models.values()]
         command = [self.simarrange_path, "--dryrun",
@@ -494,7 +502,7 @@ class StlPlater(Plater):
             if "Generating plate" in line:
                 plateid = int(line.split()[-1])
                 if plateid > 0:
-                    print _("Plate full, please remove some objects")
+                    logging.error(_("Plate full, please remove some objects"))
                     break
             if "File:" in line:
                 bits = pos_regexp.match(line).groups()
@@ -512,3 +520,5 @@ class StlPlater(Plater):
                         break
         if p.wait() != 0:
             raise RuntimeError(_("simarrange failed"))
+
+StlPlater = make_plater(StlPlaterPanel)

@@ -84,6 +84,7 @@ To use pronterface, you need:
   * numpy (for 3D view)
   * pycairo (to use Projector feature)
   * cairosvg (to use Projector feature)
+  * dbus (to inhibit sleep on some Linux systems)
 
 Please see specific instructions for Windows and Mac OS X below. Under Linux, you should use your package manager directly (see the "GETTING PRINTRUN" section), or pip:
 
@@ -94,6 +95,12 @@ Please see specific instructions for Windows and Mac OS X below. Under Linux, yo
 Printrun default G-Code parser is quite memory hungry, but we also provide a much lighter one which just needs an extra build-time dependency (Cython), plus compiling the extension with:
 
     python setup.py build_ext --inplace
+
+The warning message
+
+    WARNING:root:Memory-efficient GCoder implementation unavailable: No module named gcoder_line
+
+means that this optimized G-Code parser hasn't been compiled. To get rid of it and benefit from the better implementation, please install Cython and run the command above.
 
 ### Windows
 
@@ -186,6 +193,35 @@ sender, or the following code example:
     p.pause()
     p.resume()
     p.disconnect()
+
+## PLATERS
+
+Printrun provides two platers: a STL plater (```plater.py```) and a G-Code plater (```gcodeplater.py```).
+
+## 3D VIEWER CONTROLS
+
+When the 3D viewer is enabled, the controls are the following:
+- Mousewheel: zoom (Control reduces the zoom change steps)
+- Shift+mousewheel: explore layers (in print gcode view ; Control key makes layer change by increments of 10 instead of 1) or rotate object (in platers)
+- Left-click dragging: rotate view
+- Right-click dragging: pan view
+- Shift + left-click dragging: move object (in platers)
+- Page up/down keys: zoom (Control reduces the zoom change steps)
+- Up/down keys: explore layers
+- R key: reset view
+- F key: fit view to display entire print
+- C key: toggle "display current layer only" mode (in print gcode view)
+
+## RPC SERVER
+
+```pronterface``` and ```pronsole``` start a RPC server, which runs by default
+on localhost port 7978, which provides print progress information.
+Here is a sample Python script querying the print status:
+
+    import xmlrpclib
+
+    rpc = xmlrpclib.ServerProxy('http://localhost:7978')
+    print rpc.status()
 
 ## CONFIGURATION
 

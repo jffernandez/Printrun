@@ -18,6 +18,7 @@
 from .utils import install_locale, iconfile
 install_locale('plater')
 
+import logging
 import os
 import types
 import wx
@@ -30,11 +31,15 @@ def patch_method(obj, method, replacement):
         return replacement(*a, **kwargs)
     setattr(obj, method, types.MethodType(wrapped, obj))
 
-class Plater(wx.Frame):
-    def __init__(self, filenames = [], size = (800, 580), callback = None, parent = None, build_dimensions = None):
-        super(Plater, self).__init__(parent, title = _("Plate building tool"), size = size)
+class PlaterPanel(wx.Panel):
+    def __init__(self, **kwargs):
+        self.destroy_on_done = False
+        parent = kwargs.get("parent", None)
+        super(PlaterPanel, self).__init__(parent = parent)
+        self.prepare_ui(**kwargs)
+
+    def prepare_ui(self, filenames = [], callback = None, parent = None, build_dimensions = None):
         self.filenames = filenames
-        self.SetIcon(wx.Icon(iconfile("plater.png"), wx.BITMAP_TYPE_PNG))
         self.mainsizer = wx.BoxSizer(wx.HORIZONTAL)
         panel = self.menupanel = wx.Panel(self, -1)
         sizer = self.menusizer = wx.GridBagSizer()
@@ -93,7 +98,7 @@ class Plater(wx.Frame):
                 if self.initpos is None:
                     self.initpos = event.GetPositionTuple()
                 else:
-                    if not event.ShiftDown():
+                    if event.ShiftDown():
                         p1 = self.initpos
                         p2 = event.GetPositionTuple()
                         x1, y1, _ = self.mouse_to_3d(p1[0], p1[1])
@@ -106,7 +111,7 @@ class Plater(wx.Frame):
         # Patch handle_wheel on the fly
         if hasattr(viewer, "handle_wheel"):
             def handle_wheel(self, event, orig_handler):
-                if not event.ShiftDown():
+                if event.ShiftDown():
                     delta = event.GetWheelRotation()
                     angle = 10
                     if delta > 0:
@@ -148,7 +153,7 @@ class Plater(wx.Frame):
         model.rot += angle
 
     def autoplate(self, event = None):
-        print _("Autoplating")
+        logging.info(_("Autoplating"))
         separation = 2
         try:
             from printrun import packer
@@ -195,7 +200,7 @@ class Plater(wx.Frame):
                     max[1] = cursor[1] + x
                 cursor[0] += x + separation
                 if (cursor[1] + y) >= bedsize[1]:
-                    print _("Bed full, sorry sir :(")
+                    logging.info(_("Bed full, sorry sir :("))
                     self.Refresh()
                     return
             centerx = self.build_dimensions[0] / 2 + self.build_dimensions[3]
@@ -278,3 +283,18 @@ class Plater(wx.Frame):
 
     def export_to(self, name):
         raise NotImplementedError
+
+class Plater(wx.Frame):
+    def __init__(self, **kwargs):
+        self.destroy_on_done = True
+        parent = kwargs.get("parent", None)
+        size = kwargs.get("size", (800, 580))
+        if "size" in kwargs:
+            del kwargs["size"]
+        wx.Frame.__init__(self, parent, title = _("Plate building tool"), size = size)
+        self.SetIcon(wx.Icon(iconfile("plater.png"), wx.BITMAP_TYPE_PNG))
+        self.prepare_ui(**kwargs)
+
+def make_plater(panel_class):
+    name = panel_class.__name__.replace("Panel", "")
+    return type(name, (Plater, panel_class), {})

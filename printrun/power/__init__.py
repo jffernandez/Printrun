@@ -14,7 +14,6 @@
 # along with Printrun.  If not, see <http://www.gnu.org/licenses/>.
 
 import platform
-import traceback
 import logging
 import os
 
@@ -34,9 +33,8 @@ elif platform.system() == "Windows":
     def deinhibit_sleep():
         ctypes.windll.kernel32.SetThreadExecutionState(ctypes.c_int(ES_CONTINUOUS))
 else:
-    import dbus
-
     try:
+        import dbus
         inhibit_sleep_handler = None
         inhibit_sleep_token = None
         bus = dbus.SessionBus()
@@ -67,7 +65,7 @@ else:
                 return
             inhibit_sleep_handler.UnInhibit(inhibit_sleep_token)
             inhibit_sleep_token = None
-    except dbus.DBusException, e:
+    except Exception, e:
         logging.warning("Could not setup DBus for sleep inhibition: %s" % e)
 
         def inhibit_sleep(reason):
@@ -79,18 +77,39 @@ else:
 try:
     import psutil
 
-    if platform.system() != "Windows":
-        import resource
-        rlimit_nice = 13 if not hasattr(psutil, "RLIMIT_NICE") else psutil.RLIMIT_NICE
-        nice_limit, _ = resource.getrlimit(rlimit_nice)
-        high_priority_nice = 20 - nice_limit
+    def get_nice(nice, p = None):
+        if not p: p = psutil.Process(os.getpid())
+        if callable(p.nice):
+            return p.nice()
+        else:
+            return p.nice
 
-    def set_nice(nice):
-        p = psutil.Process(os.getpid())
+    def set_nice(nice, p = None):
+        if not p: p = psutil.Process(os.getpid())
         if callable(p.nice):
             p.nice(nice)
         else:
             p.nice = nice
+
+    if platform.system() != "Windows":
+        import resource
+        if hasattr(psutil, "RLIMIT_NICE"):
+            nice_limit, _ = resource.getrlimit(psutil.RLIMIT_NICE)
+            high_priority_nice = 20 - nice_limit
+        else:
+            high_priority_nice = 0
+            # RLIMIT_NICE is not available (probably OSX), let's probe
+            # Try setting niceness to -20 .. -1
+            p = psutil.Process(os.getpid())
+            orig_nice = get_nice(p)
+            for i in range(-20, 0):
+                try:
+                    set_nice(i, p)
+                    high_priority_nice = i
+                    break
+                except psutil.AccessDenied, e:
+                    pass
+            set_nice(orig_nice, p)
 
     def set_priority():
         if platform.system() == "Windows":
@@ -113,9 +132,8 @@ try:
     def powerset_print_stop():
         reset_priority()
         deinhibit_sleep()
-except ImportError:
-    print "psutil unavailable, could not import power utils:"
-    traceback.print_exc()
+except ImportError, e:
+    logging.warning("psutil unavailable, could not import power utils:" + str(e))
 
     def powerset_print_start(reason):
         pass

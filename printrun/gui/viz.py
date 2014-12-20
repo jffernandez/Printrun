@@ -14,10 +14,9 @@
 # along with Printrun.  If not, see <http://www.gnu.org/licenses/>.
 
 import traceback
+import logging
 
 import wx
-
-from printrun import gviz
 
 class NoViz(object):
 
@@ -26,16 +25,34 @@ class NoViz(object):
     def clear(self, *a):
         pass
 
+    def addfile_perlayer(self, gcode, showall = False):
+        layer_idx = 0
+        while layer_idx < len(gcode.all_layers):
+            yield layer_idx
+            layer_idx += 1
+        yield None
+
     def addfile(self, *a, **kw):
         pass
 
     def addgcode(self, *a, **kw):
         pass
 
+    def addgcodehighlight(self, *a, **kw):
+        pass
+
     def Refresh(self, *a):
         pass
 
     def setlayer(self, *a):
+        pass
+
+class NoVizWindow(object):
+
+    def __init__(self):
+        self.p = NoViz()
+
+    def Destroy(self):
         pass
 
 class VizPane(wx.BoxSizer):
@@ -45,6 +62,8 @@ class VizPane(wx.BoxSizer):
         if not parentpanel: parentpanel = root.panel
         if root.settings.mainviz == "None":
             root.gviz = NoViz()
+            root.gwindow = NoVizWindow()
+            return
         use2dview = root.settings.mainviz == "2D"
         if root.settings.mainviz == "3D":
             try:
@@ -53,10 +72,11 @@ class VizPane(wx.BoxSizer):
                 root.gviz.clickcb = root.show_viz_window
             except:
                 use2dview = True
-                print "3D view mode requested, but we failed to initialize it."
-                print "Falling back to 2D view, and here is the backtrace:"
-                traceback.print_exc()
+                logging.error("3D view mode requested, but we failed to initialize it.\n"
+                              + "Falling back to 2D view, and here is the backtrace:\n"
+                              + traceback.format_exc())
         if use2dview:
+            from printrun import gviz
             root.gviz = gviz.Gviz(parentpanel, (300, 300),
                                   build_dimensions = root.build_dimensions_list,
                                   grid = (root.settings.preview_grid_step1, root.settings.preview_grid_step2),
@@ -75,10 +95,11 @@ class VizPane(wx.BoxSizer):
                 root.gwindow = printrun.gcview.GcodeViewFrame(None, wx.ID_ANY, 'Gcode view, shift to move view, mousewheel to set layer', size = (600, 600), build_dimensions = root.build_dimensions_list, objects = objects, root = root, circular = root.settings.circular_bed, antialias_samples = int(root.settings.antialias3dsamples))
             except:
                 use3dview = False
-                print "3D view mode requested, but we failed to initialize it."
-                print "Falling back to 2D view, and here is the backtrace:"
-                traceback.print_exc()
+                logging.error("3D view mode requested, but we failed to initialize it.\n"
+                              + "Falling back to 2D view, and here is the backtrace:\n"
+                              + traceback.format_exc())
         if not use3dview:
+            from printrun import gviz
             root.gwindow = gviz.GvizWindow(build_dimensions = root.build_dimensions_list,
                                            grid = (root.settings.preview_grid_step1, root.settings.preview_grid_step2),
                                            extrusion_width = root.settings.preview_extrusion_width,
